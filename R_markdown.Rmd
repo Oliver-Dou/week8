@@ -59,7 +59,7 @@ crs(listlandsat)
 ```{r}
 # get band 8
 b8list<-dir_info(here::here("data"))%>%
-  dplyr::filter(str_detect(path, "[B8].TIF")) %>%
+  dplyr::filter(str_detect(path, "[B8].tif")) %>%
   dplyr::select(path)%>%
   pull()%>%
   as.character()%>%
@@ -238,10 +238,9 @@ veg %>%
 ```
 
 ```{r}
-install.packages("RStoolbox", dependencies = TRUE)
-  library(RStoolbox)
+library(RStoolbox)
 
-MTL<-dir_info(here::here("prac7_data", "Lsatdata")) %>%
+MTL<-dir_info(here::here("data")) %>%
   dplyr::filter(str_detect(path, "MTL.txt")) %>%
   dplyr::select(path)%>%
   pull()%>%
@@ -249,5 +248,246 @@ MTL<-dir_info(here::here("prac7_data", "Lsatdata")) %>%
 
  #To see all the attributes
 head(MTL)
+```
+
+```{r}
+offsetandgain <-MTL %>%
+  getMeta("B10_dn", metaData = ., what = "CALRAD")
+
+offsetandgain
+```
+
+```{r}
+offsetandgain <- subset(MTL$CALRAD, rownames(MTL$CALRAD) == "B10_dn")
+```
+
+```{r}
+TOA <- offsetandgain$gain *
+  lsatmask$LC08_L1TP_203023_20190513_20190521_01_T1_B10_mask + 
+  offsetandgain$offset
+```
+
+```{r}
+Calidata <- MTL$CALBT%>%
+  terra::as.data.frame()%>%
+  mutate(Band=rownames(.))%>%
+  filter(Band=="B10_dn")
+
+# subset the columns
+K1 <- Calidata %>%
+  dplyr::select(K1)%>%
+  pull()
+
+K2 <- Calidata %>%
+  dplyr::select(K2)%>%
+  pull()
+
+Brighttemp <- (K2 / log((K1 / TOA) + 1))
+```
+
+```{r}
+facveg <- (ndvi-0.2/0.5-0.2)^2
+emiss <- 0.004*facveg+0.986
+```
+```{r}
+Boltzmann <- 1.38*10e-23
+Plank <- 6.626*10e-34
+c <- 2.998*10e8
+
+p <- Plank*(c/Boltzmann)
+```
+
+```{r}
+#define remaining varaibles
+lambda <- 1.09e-5
+#run the LST calculation
+LST <- Brighttemp/(1 +(lambda*Brighttemp/p)*log(emiss))
+# check the values
+LST
+```
+
+```{r}
+LST <- LST-273.15
+plot(LST)
+```
+
+```{r}
+NDBI=((lsatmask$LC08_L1TP_203023_20190513_20190521_01_T1_B6_mask-
+         lsatmask$LC08_L1TP_203023_20190513_20190521_01_T1_B5_mask)/
+        (lsatmask$LC08_L1TP_203023_20190513_20190521_01_T1_B6_mask+
+        lsatmask$LC08_L1TP_203023_20190513_20190521_01_T1_B5_mask))
+
+NDBIfunexample <- NDVIfun(lsatmask$LC08_L1TP_203023_20190513_20190521_01_T1_B6_mask,
+                          lsatmask$LC08_L1TP_203023_20190513_20190521_01_T1_B5_mask)
+```
+
+```{r}
+plot(values(NDBI), values(LST))
+```
+
+```{r}
+# stack the layers
+
+computeddata <- LST%>%
+  stack(.,NDBI)%>%
+  terra::as.data.frame()%>%
+  na.omit()%>%
+  # take a random subset
+  dplyr::sample_n(., 500)%>%
+  dplyr::rename(Temp="layer.1", NDBI="layer.2")
+
+ # check the output
+plot(computeddata$Temp, computeddata$NDBI)
+```
+
+```{r}
+library(plotly)
+library(htmlwidgets)
+```
+
+```{r}
+heat<-ggplot(computeddata, aes(x = NDBI, y = Temp))+
+  geom_point(alpha=2, colour = "#51A0D5")+
+  labs(x = "Temperature", 
+       y = "Urban index",
+       title = "Manchester urban and temperature relationship")+
+   geom_smooth(method='lm', se=FALSE)+
+  theme_classic()+
+  theme(plot.title = element_text(hjust = 0.5))
+
+# interactive plot
+ggplotly(heat)
+```
+
+```{r}
+computeddatafull <- LST%>%
+  stack(.,NDBI)%>%
+  terra::as.data.frame()%>%
+  na.omit()%>%
+  # take a random subset
+  dplyr::rename(Temp="layer.1", NDBI="layer.2")
+
+hexbins <- ggplot(computeddatafull, 
+                  aes(x=NDBI, y=Temp)) +
+  geom_hex(bins=100, na.rm=TRUE) +
+  labs(fill = "Count per bin")+
+  geom_smooth(method='lm', se=FALSE, size=0.6)+
+  theme_bw()
+
+ggplotly(hexbins)
+```
+
+```{r}
+install.packages("rstatix")
+library(rstatix)
+Correlation <- computeddatafull %>%
+  cor_test(Temp, NDBI, use = "complete.obs", method = c("pearson"))
+
+Correlation
+```
+
+```{r}
+abs(qt(0.05/2, 198268))
+```
+```{r}
+computeddatafull %>%
+  pull(Temp)%>%
+  length()
+
+length(computeddatafull)
+```
+```{r}
+library(dplyr)
+library(sf)
+
+# read in LSOA data
+UK_LSOA <- st_read(here::here("data", 
+                                          
+                                          "5878ebcf-f091-4bde-8864-aa547dd45afd2020330-1-8g4usn.8evuq.shp"))
+```
+
+```{r}
+# project it to match Manchester boundary
+UK_LSOA <- UK_LSOA %>%
+  st_transform(., 32630)
+
+# read in MSOA and project it
+MSOA <- st_read(here::here("data",
+                           
+                           "Middle_Layer_Super_Output_Areas_December_2011_Generalised_Clipped_Boundaries_in_England_and_Wales.shp")) %>%
+   st_transform(., 32630)
+```
+
+```{r}
+#select only MSOA within boundary
+manchester_MSOA <- MSOA[manchester_boundary, , op=st_within]
+
+#select only LSOA that intersect MSOA
+manchester_LSOA <- UK_LSOA[manchester_MSOA,]
+```
+
+```{r}
+ 
+LST_per_LSOA <- raster::extract(LST, manchester_LSOA, fun=mean, na.rm=TRUE, df=TRUE)
+
+# add the LSOA ID back
+LST_per_LSOA$FID<-manchester_LSOA$FID
+
+# join the average temp to the sf
+manchester_LSOA_temp <- manchester_LSOA %>%
+  left_join(.,
+            LST_per_LSOA,
+            by="FID")%>%
+  dplyr::rename(temp=layer)
+```
+
+```{r}
+#define urban as NDBI greater than 0
+NDBI_urban<- NDBI > 0
+
+# Sum the pixels that are grater than 0 per LSOA
+NDBI_urban_per_LSOA <- raster::extract(NDBI_urban, manchester_LSOA, na.rm=TRUE, df=TRUE, fun=sum)
+
+# list the pixels per LSOA
+NDBI_per_LSOA_cells <- raster::extract(NDBI_urban, manchester_LSOA, na.rm=TRUE, df=TRUE, cellnumbers=TRUE)
+
+#count the pixels per LSOA
+NDBI_per_LSOA2_cells<- NDBI_per_LSOA_cells %>%
+  count(ID)
+
+#add the LSOA ID to the urban area
+NDBI_urban_per_LSOA$FID<-manchester_LSOA$FID
+
+#add the LSOA ID to the number of cells
+NDBI_per_LSOA2_cells$FID<-manchester_LSOA$FID
+
+#join these two
+Urban_info_LSOA <- NDBI_urban_per_LSOA %>%
+  left_join(.,
+            NDBI_per_LSOA2_cells,
+            by="FID")
+
+# remove what you don't need and rename
+Urban_info_LSOA_core_needed <- Urban_info_LSOA %>%
+  dplyr::rename(urban_count=layer, 
+                LSOA_cells=n) %>%
+  dplyr::select(urban_count,
+         LSOA_cells,
+         FID)%>%
+  dplyr::mutate(percent_urban=urban_count/LSOA_cells*100)
+
+# join the data 
+# one sf with temp and % urban per LSOA
+manchester_LSOA_temp_urban <- manchester_LSOA_temp %>%
+  left_join(.,
+             Urban_info_LSOA_core_needed,
+             by="FID")
+```
+
+```{r}
+Places <- st_read(here::here("data", 
+                                          
+                                          "gis_osm_places_free_1.shp")) %>%
+   st_transform(., 32630)
 ```
 
