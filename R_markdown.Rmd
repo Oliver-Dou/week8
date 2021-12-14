@@ -5,3 +5,249 @@ date: "2021/12/14"
 output: html_document
 ---
 
+```{r}
+library(tidyverse)
+library(fs)
+library(stringr)
+library(utils)
+
+listfiles<-dir_info(here::here("data")) %>%
+  dplyr::filter(str_detect(path, ".gz")) %>%
+  dplyr::select(path)%>%
+  dplyr::pull()%>%
+  #print out the .gz file
+  print()%>%
+  as.character()%>%
+  utils::untar(exdir=here::here("data"))
+```
+
+```{r}
+library(sp)
+library(raster)
+library(rgeos)
+library(rgdal)
+library(rasterVis)
+library(ggplot2)
+library(terra)
+library(sf)
+library(stringr)
+library(raster)
+library(fs)
+library(sf)
+library(tidyverse)
+```
+
+```{r}
+# List your raster files excluding band 8 using the patter argument
+listlandsat<-dir_info(here::here("data"))%>%
+  dplyr::filter(str_detect(path, "[B123456790].TIF")) %>%
+  dplyr::select(path)%>%
+  pull()%>%
+  as.character()%>%
+  # Load our raster layers into a stack
+  stack()
+
+# Load the manchester boundary
+manchester_boundary <- st_read(here::here("data", 
+                                        
+                                          "Manchester_boundary.shp"))
+
+crs(manchester_boundary)
+crs(listlandsat)
+```
+
+```{r}
+# get band 8
+b8list<-dir_info(here::here("data"))%>%
+  dplyr::filter(str_detect(path, "[B8].TIF")) %>%
+  dplyr::select(path)%>%
+  pull()%>%
+  as.character()%>%
+  raster()
+```
+
+```{r}
+b8correct <- b8list%>%
+  resample(., listlandsat$LC08_L1TP_203023_20190513_20190521_01_T1_B1, 
+             method = "ngb") %>%
+  # Write out the raster
+writeRaster(.,str_c(here::here("data"), 
+                  names(b8list), 
+                  sep="/"),
+            format='GTiff', 
+            overwrite=TRUE)
+```
+
+```{r}
+b8backin<-dir_info(here::here("data"))%>%
+  dplyr::filter(str_detect(path, "[B8].tif")) %>%
+  dplyr::select(path)%>%
+  pull()%>%
+  as.character()%>%
+  raster()
+  
+listlandsat <- listlandsat %>%
+  addLayer(., b8backin)
+```
+
+```{r}
+raster::compareRaster(listlandsat$LC08_L1TP_203023_20190513_20190521_01_T1_B1,
+              listlandsat$LC08_L1TP_203023_20190513_20190521_01_T1_B8)
+```
+
+```{r}
+lsatmask <- listlandsat %>%
+  # now crop our temp data to the extent
+  raster::crop(.,manchester_boundary)%>%
+  raster::mask(.,  manchester_boundary)
+```
+
+```{r}
+# add mask to the filenames within the raster stack
+
+names(lsatmask) <- names(lsatmask)%>%
+  str_c(., 
+        "mask", 
+        sep="_")
+
+# I need to write mine out in another location
+outputfilenames <-
+  str_c("data/", names(lsatmask) ,sep="")
+```
+
+```{r}
+lsatmask %>%
+  writeRaster(., names(lsatmask), 
+              bylayer=TRUE, 
+              format='GTiff', 
+              overwrite=TRUE)
+```
+
+```{r}
+lsatmask %>%
+  writeRaster(., outputfilenames, 
+              bylayer=TRUE, 
+              format='GTiff', 
+              overwrite=TRUE)
+```
+
+```{r}
+manc_files<-dir_info(here::here("data")) %>%
+  dplyr::filter(str_detect(path, "[B1234567]_mask.tif")) %>%
+  dplyr::filter(str_detect(path, "B11", negate=TRUE))%>%
+  dplyr::select(path)%>%
+  pull()%>%
+  stack()
+
+# or extract them from the original stack
+manc<-stack(lsatmask$LC08_L1TP_203023_20190513_20190521_01_T1_B1_mask,
+                   lsatmask$LC08_L1TP_203023_20190513_20190521_01_T1_B2_mask,
+                   lsatmask$LC08_L1TP_203023_20190513_20190521_01_T1_B3_mask,
+                   lsatmask$LC08_L1TP_203023_20190513_20190521_01_T1_B4_mask,
+                   lsatmask$LC08_L1TP_203023_20190513_20190521_01_T1_B5_mask,
+                   lsatmask$LC08_L1TP_203023_20190513_20190521_01_T1_B6_mask,
+                   lsatmask$LC08_L1TP_203023_20190513_20190521_01_T1_B7_mask)
+
+# Name the Bands based on where they sample the electromagentic spectrum
+names(manc) <- c('ultra-blue', 'blue', 'green', 'red', 'NIR', 'SWIR1', 'SWIR2')
+```
+
+```{r}
+# true colour composite
+manc_rgb <- stack(manc$red, manc$green, manc$blue)
+# false colour composite
+manc_false <- stack(manc$NIR, manc$red, manc$green)
+
+manc_rgb %>%
+  plotRGB(.,axes=TRUE, stretch="lin")
+```
+
+```{r}
+manc_false %>%
+    plotRGB(.,axes=TRUE, stretch="lin")
+```
+
+```{r}
+# Looking at single bands
+plot(manc$SWIR2)
+```
+
+```{r}
+## How are these bands different?
+#set the plot window size (2 by 2)
+par(mfrow = c(2,2))
+#plot the bands
+plot(manc$blue, main = "Blue")
+plot(manc$green, main = "Green")
+plot(manc$red, main = "Red")
+plot(manc$NIR, main = "NIR")
+```
+
+```{r}
+library(ggplot2)
+library(GGally)
+
+manc %>%
+  terra::as.data.frame(., na.rm=TRUE)%>%
+  dplyr::sample_n(., 100)%>%
+  ggpairs(.,axisLabels="none")
+```
+
+```{r}
+NDVIfun <- function(NIR, Red) {
+  NDVI <- (NIR - Red) / (NIR + Red)
+  return(NDVI)
+}
+source(here::here('data/source.txt'))
+```
+
+```{r}
+ndvi <- NDVIfun(manc$NIR, manc$red)
+ndvi %>%
+  plot(.,col = rev(terrain.colors(10)), main = "Landsat-NDVI")
+```
+
+```{r}
+# Let's look at the histogram for this dataset
+ndvi %>%
+  hist(., breaks = 40, main = "NDVI Histogram", xlim = c(-.3,.8))
+```
+
+```{r}
+veg <- ndvi %>%
+  reclassify(., cbind(-Inf, 0.3, NA))
+
+veg %>%
+  plot(.,main = 'Possible Veg cover')
+```
+
+```{r}
+manc_rgb %>%
+  plotRGB(.,axes = TRUE, stretch = "lin", main = "Landsat True Color Composite")
+
+veg %>%
+  plot(., add=TRUE, legend=FALSE)
+```
+
+```{r}
+manc_rgb %>%
+  plotRGB(.,axes = TRUE, stretch = "lin", main = "Landsat True Color Composite")
+
+veg %>%
+  plot(., add=TRUE, legend=FALSE)
+```
+
+```{r}
+install.packages("RStoolbox", dependencies = TRUE)
+  library(RStoolbox)
+
+MTL<-dir_info(here::here("prac7_data", "Lsatdata")) %>%
+  dplyr::filter(str_detect(path, "MTL.txt")) %>%
+  dplyr::select(path)%>%
+  pull()%>%
+  readMeta()
+
+ #To see all the attributes
+head(MTL)
+```
+
